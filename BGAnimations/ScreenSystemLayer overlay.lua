@@ -486,6 +486,378 @@ t[#t+1] = Def.ActorFrame{
 -- Loads the UnlocksCache from disk for SRPG unlocks.
 LoadUnlocksCache()
 
+
+-- -----------------------------------------------------------------------
+-- ALL ONLINE PLAY SOCKET STUFF
+
+local isWaiting = false
+local readyState = {
+	["P1"] = false,
+	["P2"] = false
+}
+local songSelected = false
+
+-- This input handler is used to lock input while we're waiting on the server to tell us to proceed.
+-- It does nothing, but it's necessary to prevent the player from interacting with the screen
+-- until everyone is ready.
+local InputHandler = function(event)
+	if SCREENMAN:GetTopScreen():GetName() == "ScreenGameplay" and isWaiting then
+		if event.type == "InputEventType_FirstPress" and event.GameButton == "Start" then
+			local pn = ToEnumShortString(event.PlayerNumber)
+			readyState[pn] = true
+
+			MESSAGEMAN:Broadcast("UpdateMachineState")
+		end
+	else
+		return false
+	end
+end
+
+local CreateRequest = function(event, data)
+	return JsonEncode({
+		event=event,
+		data=data
+	})
+end
+
+local GetJudgmentCounts = function(player)
+	local counts = GetExJudgmentCounts(player)
+	local translation = {
+		["W0"] = "fantasticPlus",
+		["W1"] = "fantastics",
+		["W2"] = "excellents",
+		["W3"] = "greats",
+		["W4"] = "decents",
+		["W5"] = "wayOffs",
+		["Miss"] = "misses",
+		["totalSteps"] = "totalSteps",
+		["Mines"] = "minesHit",
+		["totalMines"] = "totalMines",
+		["Holds"] = "holdsHeld",
+		["totalHolds"] = "totalHolds",
+		["Rolls"] = "rollsHeld",
+		["totalRolls"] = "totalRolls"
+	}
+
+	local judgmentCounts = {}
+
+	for key, value in pairs(counts) do
+		if translation[key] ~= nil then
+			judgmentCounts[translation[key]] = value
+		end
+	end
+
+	return judgmentCounts
+end
+
+local GetMachineState = function()
+	local screen = SCREENMAN:GetTopScreen():GetName()
+
+	local players = {}
+	for player in ivalues(GAMESTATE:GetEnabledPlayers()) do
+		local profileName = "NoName"
+		if (PROFILEMAN:IsPersistentProfile(player) and
+				PROFILEMAN:GetProfile(player)) then
+			profileName = PROFILEMAN:GetProfile(player):GetDisplayName()
+		end
+
+		local judgments = nil
+		local score = nil
+		local exScore = nil
+		if screen == "ScreenGameplay" or screen == "ScreenEvaluationStage" then
+			judgments = GetJudgmentCounts(player)
+			local dance_points = STATSMAN:GetCurStageStats():GetPlayerStageStats(player):GetPercentDancePoints()
+			local percent = FormatPercentScore( dance_points ):gsub("%%", "")
+			score = tonumber(percent)
+			exScore = CalculateExScore(player)
+		end
+
+		local pn = ToEnumShortString(player)
+		players[pn] = {
+			playerId = pn,
+			profileName = profileName,
+			screenName=screen,
+
+			judgments = judgments,
+			score = score,
+			exScore = exScore,
+			ready=(screen == "ScreenGameplay" and readyState[pn] or nil)
+		}
+	end
+
+	-- If "P1"/"P2" is missing from players, then the player isn't enabled the corresponding
+	-- player1/player2 key will be nil.
+	return {
+		machine = {
+			player1=players["P1"],
+			player2=players["P2"]
+		}
+	}
+end
+
+local DisplayLobbyState = function(data, actor)
+	local screen = SCREENMAN:GetTopScreen():GetName()
+
+	local lines = {}
+
+	if screen == "ScreenSelectMusic" then
+
+		if isWaiting then
+			local allReady = true
+			for player in ivalues(data.players) do
+				if player.screenName ~= screen then
+					allReady = false
+					return
+				end
+			end
+
+			if allReady then
+				isWaiting = false
+				SCREENMAN:GetTopScreen():RemoveInputCallback(InputHandler)
+				for player in ivalues(PlayerNumber) do
+					SCREENMAN:set_input_redirected(player, false)
+				end
+			end
+		end
+
+		for player in ivalues(data.players) do
+			lines[#lines+1] = (#lines+1)..'. '..player.profileName.." - in "..player.screenName
+		end
+
+		if data.songInfo ~= nil then
+			if not songSelected then
+				songSelected = true
+				SONGMAN:FindSong(data.songInfo.songPath)
+			end
+			lines[#lines+1] = "Song: "..data.songInfo.songPath
+		end
+
+	elseif screen == "ScreenGameplay" then
+
+		if isWaiting then
+			local allReady = true
+			for player in ivalues(data.players) do
+				if player.screenName ~= screen or not player.ready then
+					allReady = false
+					break
+				end
+			end
+
+			if allReady then
+				isWaiting = false
+				SCREENMAN:GetTopScreen():RemoveInputCallback(InputHandler)
+				for player in ivalues(PlayerNumber) do
+					SCREENMAN:set_input_redirected(player, false)
+				end
+				SCREENMAN:GetTopScreen():PauseGame(false)
+			end
+		end
+
+		if isWaiting then
+			for player in ivalues(data.players) do
+				lines[#lines+1] = (#lines+1)..'. '..player.profileName.." - "..(player.ready and "Ready" or "Not Ready")
+			end
+		else
+			for player in ivalues(data.players) do
+				local score = (player.score ~= nil and player.score) or 0
+				local exScore = (player.exScore ~= nil and player.exScore) or 0
+
+				local scoreStr = string.format("%.2f", score).."%"
+				local exScoreStr = string.format("%.2f", exScore).."%"
+				lines[#lines+1] = (#lines+1)..'. '..player.profileName.." - "..scoreStr.." - "..exScoreStr.." EX"
+			end
+		end
+
+	elseif screen == "ScreenEvaluationStage" then
+
+		if isWaiting then
+			local allReady = true
+			for player in ivalues(data.players) do
+				if player.screenName ~= screen then
+					allReady = false
+					return
+				end
+			end
+
+			if allReady then
+				isWaiting = false
+				SCREENMAN:GetTopScreen():RemoveInputCallback(InputHandler)
+				for player in ivalues(PlayerNumber) do
+					SCREENMAN:set_input_redirected(player, false)
+				end
+			end
+		end
+
+		for player in ivalues(data.players) do
+			local score = (player.score ~= nil and player.score) or 0
+			local exScore = (player.exScore ~= nil and player.exScore) or 0
+
+			local scoreStr = string.format("%.2f", score).."%"
+			local exScoreStr = string.format("%.2f", exScore).."%"
+			lines[#lines+1] = (#lines+1)..'. '..player.profileName.." - "..scoreStr.." - "..exScoreStr.." EX"
+		end
+
+	else
+		-- Generic: Just show player and screen.
+		for player in ivalues(data.players) do
+			lines[#lines+1] = (#lines+1)..'. '..player.profileName.." - in "..player.screenName
+		end
+
+		if data.songInfo ~= nil then
+			lines[#lines+1] = "Song: "..data.songInfo.songPath
+		end
+
+	end
+
+	if isWaiting then
+		lines[#lines+1] = "Waiting for other players..."
+	end
+
+	actor:GetChild("Display"):playcommand("UpdateText", {text=table.concat(lines, "\n")})
+end
+
+local HandleResponse = function(response, actor)
+	local event = response.event
+	local data = response.data
+
+	if event == "lobbyState" then
+		DisplayLobbyState(data, actor)
+	end
+end
+
+t[#t+1] = Def.ActorFrame{
+	Name="OnlineWebsocketHandler",
+	InitCommand=function(self)
+		self.socket = nil
+		self.connected = false
+	end,
+	ConnectOnlineMessageCommand=function(self)
+		if self.socket == nil then
+			self.socket = NETWORK:WebSocket{
+				url="ws://127.0.0.1:3000",
+				pingInterval=15,
+				automaticReconnect=true,
+				onMessage=function(msg)
+					-- SM(msg)
+					local msgType = ToEnumShortString(msg.type)
+					if msgType == "Open" then
+						self.connected = true
+						MESSAGEMAN:Broadcast("CreateLobby")
+					elseif msgType == "Message" then
+						local response = JsonDecode(msg.data)
+						HandleResponse(response, self)
+					elseif msgType == "Close" then
+						MESSAGEMAN:Broadcast("DisconnectOnline")
+					end
+				end,
+			}
+
+			self:GetChild("Display"):visible(true)
+		end
+	end,
+	ScreenChangedMessageCommand=function(self)
+		if self.connected and self.socket ~= nil then
+			local screenName = SCREENMAN:GetTopScreen():GetName()
+			SM(screenName)
+
+			-- -- When users navigate to any of these screens, we want to wait for the other player to be ready.
+			if screenName == "ScreenSelectMusic" or screenName == "ScreenGameplay" or screenName == "ScreenEvaluationStage" then
+				isWaiting = true
+				SCREENMAN:GetTopScreen():AddInputCallback(InputHandler)
+				for player in ivalues(PlayerNumber) do
+					SCREENMAN:set_input_redirected(player, true)
+				end
+			end
+
+			if screenName == "ScreenGameplay" then
+				readyState["P1"] = false
+				readyState["P2"] = false
+				SCREENMAN:GetTopScreen():PauseGame(true)
+			end
+
+			MESSAGEMAN:Broadcast("UpdateMachineState")
+		end
+	end,
+	UpdateMachineStateMessageCommand=function(self)
+		if self.connected and self.socket ~= nil then	
+			local request = CreateRequest("updateMachine", GetMachineState())
+			self.socket:Send(request)
+		end
+	end,
+	ExCountsChangedMessageCommand=function(self)
+		SM("yes")
+		if self.connected and self.socket ~= nil then	
+			local request = CreateRequest("updateMachine", GetMachineState())
+			self.socket:Send(request)
+		end
+	end,
+	SongSelectedMessageCommand=function(self)
+		if self.connected and self.socket ~= nil then
+			local song = GAMESTATE:GetCurrentSong()
+			-- GetSongDir returns /Songs/<Group>/<Song>/
+			-- We convert it to: <Group>/<Song>
+			local songPath = song:GetSongDir()
+			songPath = songPath:sub(8, #songPath-1)
+
+			local data = {
+				songInfo = {
+					songPath=songPath,
+					title=song:GetDisplayFullTitle(),
+					artist=song:GetDisplayArtist(),
+					songLength=song:MusicLengthSeconds()
+				}
+			}
+			local request = CreateRequest("selectSong", data)
+			self.socket:Send(request)
+		end
+	end,
+	CreateLobbyMessageCommand=function(self)
+		SM("create lobby")
+		if self.connected and self.socket ~= nil then
+			local data = GetMachineState()
+			data.password = ""
+			local request = CreateRequest("createLobby", data)
+			self.socket:Send(request)
+		end
+	end,
+	DisconnectOnlineMessageCommand=function(self)
+		if self.socket ~= nil then
+			self.socket:Close()
+		end
+		self.connected = false
+		self.socket = nil
+		self:GetChild("Display"):visible(false)
+	end,
+
+	Def.ActorFrame{
+		Name="Display",
+		InitCommand=function(self)
+			self:visible(false)
+			self:xy(_screen.cx + SCREEN_WIDTH / 6, _screen.cy)
+		end,
+
+		UpdateTextCommand=function(self, params)
+			self:GetChild("Text"):settext(params.text)
+		end,
+
+		Def.Quad{
+			Name="Background",
+			InitCommand=function(self)
+				self:zoomto(SCREEN_WIDTH / 3, SCREEN_HEIGHT / 2):diffuse(0, 0, 0, 0.5)
+			end,
+		},
+
+		LoadFont("Common Normal").. {
+			Name="Text",
+			Text="",
+			InitCommand=function(self)
+				self:wrapwidthpixels(SCREEN_WIDTH / 3)
+			end,
+		},
+	},
+}
+
+
 -- -----------------------------------------------------------------------
 -- SystemMessage stuff.
 -- Put it on top of everything
