@@ -897,8 +897,7 @@ t[#t+1] = Def.ActorFrame{
 	Def.ActorFrame{
 		Name="Display",
 		InitCommand=function(self)
-			self:visible(true)
-			self:xy(_screen.cx + SCREEN_WIDTH / 6, _screen.cy)
+			self:visible(false)
 		end,
 
 		UpdateTextCommand=function(self, params)
