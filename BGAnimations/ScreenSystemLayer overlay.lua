@@ -492,17 +492,17 @@ LoadUnlocksCache()
 
 local isWaiting = false
 local readyState = {
-	["P1"] = false,
-	["P2"] = false
+	["P1"] = true,
+	["P2"] = true
 }
 local songSelected = false
 -- These screens are the ones we want to display the player's scores for.
 local scoreScreens = {"ScreenGameplay", "ScreenEvaluationStage"}
 
 -- TESTING Variables
-local url = "192.168.1.71"
+local url = "127.0.0.1"
 local roomCode = ""
-local action = "join" -- "create" or "join"
+local action = "create" -- "create" or "join"
 local autoConnect = true
 
 -- This input handler is used to lock input while we're waiting on the server to tell us to proceed.
@@ -616,10 +616,8 @@ local OrderPlayers = function(data)
 		-- Additional data that we can pre-calculate.
 		aux = {
 			-- Used to give input back to the players if we're waiting.
-			-- We will evaluate and potentially toggle this to false below.
 			allInSameScreen = true,
 			-- Used to determine when to display the Ready/Not Ready state for players.
-			-- We will evaluate and potentially toggle this to false below.
 			allPlayersReady = true,
 		}
 	}
@@ -652,7 +650,7 @@ local OrderPlayers = function(data)
 
 	-- Sort the players by score.
 	-- TODO(teejusb): Determine how to do toggle between score and exScore.
-	table.sort(players, function(a, b)
+	table.sort(updatedData.players, function(a, b)
 		-- a.score or b.score can be nil, so we need to handle that.
 		if a.score == nil then
 			return false
@@ -696,6 +694,8 @@ end
 local DisplayLobbyState = function(data, actor)
 	-- NOTE(teejusb): Keep in mind that SCREENMAN:GetTopScreen() might return nil since we might be
 	-- transitioning screens when we receive any messages from the server.
+	local screen = SCREENMAN:GetTopScreen()
+	local screenName = screen and screen:GetName() or "NoScreen"
 
 	local updatedData = OrderPlayers(data)
 
@@ -712,20 +712,22 @@ local DisplayLobbyState = function(data, actor)
 				SCREENMAN:set_input_redirected(player, false)
 			end
 		else
-			lines[#lines+1] = "Waiting to players to sync...\n"
+			lines[#lines+1] = "Waiting for players...\n"
 		end
 	end
 
 	for player in ivalues(updatedData.players) do
-		local playerAndScreen = (#lines+1)..'. '..player.profileName.." - in "..player.screenName
-
+		local displayedScreen = player.screenName ~= "NoScreen" and player.screenName:gsub("Screen", "") or "Transitioning"
+		local readyText = ""
 		if not updatedData.aux.allPlayersReady then
-			playerAndScreen = playerAndScreen.." ("..(player.ready and "Ready" or "Not Ready")..")"
+			readyText =" ["..(player.ready and "✔" or "❌").."]"
 		end
 
+		local playerAndScreen = (#lines+1)..'. '..player.profileName..readyText.." - in "..displayedScreen
+
 		lines[#lines+1] = playerAndScreen
-		for screen in ivalues(scoreScreens) do
-			if player.screenName == screen then
+		for scoreScreen in ivalues(scoreScreens) do
+			if player.screenName == scoreScreen then
 				-- Display the score and EX score.
 				local score = (player.score ~= nil and player.score) or 0
 				local exScore = (player.exScore ~= nil and player.exScore) or 0
@@ -895,12 +897,48 @@ t[#t+1] = Def.ActorFrame{
 	Def.ActorFrame{
 		Name="Display",
 		InitCommand=function(self)
-			self:visible(false)
+			self:visible(true)
 			self:xy(_screen.cx + SCREEN_WIDTH / 6, _screen.cy)
 		end,
 
 		UpdateTextCommand=function(self, params)
-			self:GetChild("Text"):settext(params.text)
+			local screen = SCREENMAN:GetTopScreen()
+			local screenName = screen and screen:GetName() or "NoScreen"
+
+			local bg = self:GetChild("Background")
+			local width = 200
+			local height = SCREEN_HEIGHT
+
+			-- Some generic constants for easy positioning.
+			local LEFT = width/2
+			local RIGHT = SCREEN_WIDTH - width/2
+			local CENTER = _screen.cx
+
+			-- If we're on a different screen, we'll just retain the last position.
+			if screenName == "ScreenSelectMusic" then
+				local p1Joined = GAMESTATE:IsSideJoined("PlayerNumber_P1")
+				local p2Joined = GAMESTATE:IsSideJoined("PlayerNumber_P2")
+
+				-- If both are joined then push it to the left so keep it out of the way.
+				self:xy(LEFT, _screen.cy)
+				bg:zoomto(width, height)
+			elseif screenName == "ScreenEvaluationStage" or screenName == "ScreenGameplay" then
+				local p1Joined = GAMESTATE:IsSideJoined("PlayerNumber_P1")
+				local p2Joined = GAMESTATE:IsSideJoined("PlayerNumber_P2")
+
+				if p1Joined and p2Joined then
+					self:xy(CENTER, _screen.cy)
+					bg:zoomto(width, height)
+				elseif p1Joined then
+					self:xy(RIGHT, _screen.cy)
+					bg:zoomto(width, height)
+				elseif p2Joined then
+					self:xy(LEFT, _screen.cy)
+					bg:zoomto(width, height)
+				end
+			end
+
+			self:GetChild("Text"):playcommand("Resize", {width=width, height=height, text=params.text})
 		end,
 
 		Def.Quad{
@@ -913,9 +951,19 @@ t[#t+1] = Def.ActorFrame{
 		LoadFont("Common Normal").. {
 			Name="Text",
 			Text="",
-			InitCommand=function(self)
-				self:wrapwidthpixels(SCREEN_WIDTH / 3)
-			end,
+			ResizeCommand=function(self, params)
+				self:settext(params.text)
+				-- We don't want text to be cut off.
+				-- Incrementally adjust the zoom while checking the width until it fits.
+				-- Not the prettiest solution but it works.
+				for zoomVal=1.0, 0.1, -0.05 do
+					self:zoom(zoomVal)
+					self:settext(params.text)
+					if self:GetWidth() * zoomVal <= params.width then
+						break
+					end
+				end
+			end
 		},
 	},
 }
